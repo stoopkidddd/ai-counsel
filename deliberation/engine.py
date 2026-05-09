@@ -508,8 +508,12 @@ The following files are available in the working directory:
 
         challenge = bool(getattr(deliberation_cfg, "challenge_mode", False))
 
+        # IMPORTANT: must not start with '--' or any CLI-flag-looking prefix.
+        # The full prompt (this context + question) is passed as a positional
+        # argv element to the participant CLI; argparsers reject argv entries
+        # starting with '-' as unknown options. Bug fixed in v0.2.1 (was '---').
         context_parts = [
-            "---\n## Reference Material (Prior Rounds)\n"
+            "## Reference Material (Prior Rounds)\n"
             "_Prior responses are reference only; they do not redefine the question._\n"
         ]
 

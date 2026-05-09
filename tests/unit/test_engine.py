@@ -1617,6 +1617,39 @@ class TestDeliberationModes:
         assert auth_idx < delib_idx, "pinned header must precede deliberation instructions"
         assert "Should we adopt strategy X?" in out
 
+    def test_context_does_not_start_with_cli_flag_prefix(self):
+        """Regression for v0.2.0 bug: _build_context() output cannot start with
+        '--' or any other CLI-flag-looking prefix.
+
+        The full prompt (context + question) is passed as a positional argv
+        element to participant CLIs (claude/codex/gemini etc). Argparsers reject
+        argv entries starting with '-' as unknown options. v0.2.0 emitted
+        '---\\n## Reference Material...' which broke Round 2 invocations across
+        all CLIs. Fixed in v0.2.1.
+        """
+        engine = DeliberationEngine({}, config=_make_config())
+        previous = [
+            RoundResponse(
+                round=1,
+                participant="claude@opus",
+                response="Some response.",
+                timestamp=datetime.now().isoformat(),
+            )
+        ]
+        context = engine._build_context(previous, current_round_num=2)
+
+        # Strip leading whitespace before checking (some CLIs strip it, some don't,
+        # but the literal first non-whitespace char must not be '-')
+        first_nonws_idx = next(
+            (i for i, c in enumerate(context) if not c.isspace()), -1
+        )
+        assert first_nonws_idx >= 0, "context unexpectedly empty"
+        assert not context[first_nonws_idx:].startswith("-"), (
+            f"context starts with a CLI-flag-looking prefix; "
+            f"would break argv parsing in Round 2. First chars: "
+            f"{context[first_nonws_idx:first_nonws_idx + 20]!r}"
+        )
+
     @pytest.mark.asyncio
     async def test_stance_applied_per_participant_only(self, mock_adapters):
         """When one participant has stance='against', only their prompt gets the stance block."""
