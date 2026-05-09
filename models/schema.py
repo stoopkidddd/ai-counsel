@@ -39,6 +39,16 @@ class Participant(BaseModel):
             "If omitted, uses the adapter's configured default."
         ),
     )
+    stance: Optional[Literal["for", "against", "neutral"]] = Field(
+        default=None,
+        description=(
+            "Optional advocacy stance for this participant. "
+            "'for' = advocate for the proposal (with ethical override); "
+            "'against' = critique rigorously (with ethical override); "
+            "'neutral' = balanced analysis. "
+            "Stance instructions are prepended to this participant's prompt only."
+        ),
+    )
 
 
 class DeliberateRequest(BaseModel):

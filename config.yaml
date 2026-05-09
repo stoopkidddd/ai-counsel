@@ -567,6 +567,16 @@ deliberation:
     max_retries: 1 # Retry once per participant
     min_response_length: 100 # Only retry if response is at least 100 chars
 
+  # Context-sharing mode between rounds
+  # - "cross_pollinated" (default): each round sees prior responses (current behavior)
+  # - "blinded": each round is independent; participants don't see prior responses
+  #   Useful for reducing groupthink risk; pairs well with multiple rounds + voting.
+  mode: "cross_pollinated"
+
+  # Anti-sycophancy: wrap prior responses in critical-evaluation framing
+  # before injecting them into the next round's context. No effect when mode=blinded.
+  challenge_mode: false
+
 # Decision Graph Memory
 decision_graph:
   enabled: true # Feature toggle (opt-in)

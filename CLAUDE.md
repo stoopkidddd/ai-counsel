@@ -299,6 +299,27 @@ cli_tools:
 - Claude: No placeholder — `--effort` flag dynamically injected for Opus 4.7 and Sonnet 4.6+ (validated via `_is_opus_model()`: prefix "claude-opus-4-7" or "claude-sonnet-4-6")
 - Validation: Invalid values raise `ValueError` before subprocess call
 
+### Deliberation Modes (Pal-inspired prompt-layer controls)
+
+Three optional, config-gated controls shape how round prompts are built. All default to current behavior.
+
+**`deliberation.mode` (config.yaml)** — `"cross_pollinated"` (default) or `"blinded"`.
+- `cross_pollinated`: each round sees prior responses (current behavior).
+- `blinded`: each round is independent — `_build_context()` returns empty, no prior responses or tool results are injected. Use to reduce groupthink risk; pairs well with multiple rounds + voting.
+
+**`deliberation.challenge_mode` (config.yaml)** — bool, default `false`.
+- When `true`, each prior response is wrapped in critical-evaluation framing in `_build_context()` ("evaluate critically; do not defer"). Reduces sycophantic agreement.
+- Mutually exclusive with `mode: "blinded"` — combining them logs a warning and forces `challenge_mode` to `false` (no context to wrap). Validated in `DeliberationConfig.model_post_init`.
+
+**`Participant.stance` (per-participant)** — `"for"` | `"against"` | `"neutral"` | `None` (default).
+- Per-participant prompt augmentation. Two participants in the same round can have different stances.
+- Each stance includes a mandatory ethical override: stance is a tool for surfacing perspectives, not a license for bad-faith reasoning. Wording adapted from `pal-mcp-server/tools/consensus.py`.
+- Implementation: prepended to that participant's prompt only inside `invoke_participant` in `engine.py:execute_round()`.
+
+**Pinned original question** — applied unconditionally. The `_enhance_prompt_with_voting()` output now begins with `pinned_question_header(question)` from `deliberation/prompts.py`, ensuring the original question is the first thing every model sees. Round-2+ context is prefixed with a "Reference Material (Prior Rounds)" header so accumulated discussion cannot dilute the question.
+
+**Pure prompt fragments live in `deliberation/prompts.py`** — `stance_instructions()`, `challenge_wrapper()`, `pinned_question_header()`. No engine dependencies; unit-tested in `tests/unit/test_prompts.py`.
+
 ### Hook Management
 Claude CLI: `--settings '{"disableAllHooks": true}'` prevents hooks from interfering. Critical for reliable execution.
 

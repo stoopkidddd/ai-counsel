@@ -14,6 +14,11 @@ from adapters.base_http import BaseHTTPAdapter
 from deliberation.convergence import ConvergenceDetector
 from deliberation.file_tree import generate_file_tree
 from deliberation.metrics import get_quality_tracker
+from deliberation.prompts import (
+    challenge_wrapper,
+    pinned_question_header,
+    stance_instructions,
+)
 from models.config import FileTreeConfig, VoteRetryConfig
 from models.schema import Participant, RoundResponse, Vote, VotingResult
 from models.tool_schema import ToolExecutionRecord
@@ -277,17 +282,25 @@ The following files are available in the working directory:
             """Invoke a single participant's adapter and return the response."""
             adapter = self.adapters[participant.cli]
 
+            # Per-participant stance prepend (applies only to this participant)
+            participant_prompt = enhanced_prompt
+            if participant.stance:
+                participant_prompt = (
+                    f"{stance_instructions(participant.stance)}\n{enhanced_prompt}"
+                )
+
             reasoning_info = f", reasoning_effort={participant.reasoning_effort}" if participant.reasoning_effort else ""
+            stance_info = f", stance={participant.stance}" if participant.stance else ""
             logger.info(
                 f"Round {round_num}: Invoking {participant.model}@{participant.cli} "
-                f"with prompt_length={len(enhanced_prompt)} chars, "
+                f"with prompt_length={len(participant_prompt)} chars, "
                 f"context_length={len(context) if context else 0} chars, "
-                f"working_directory={working_directory}{reasoning_info}"
+                f"working_directory={working_directory}{reasoning_info}{stance_info}"
             )
 
             try:
                 response_text = await adapter.invoke(
-                    prompt=enhanced_prompt,
+                    prompt=participant_prompt,
                     model=participant.model,
                     context=context,
                     is_deliberation=True,
@@ -466,19 +479,39 @@ The following files are available in the working directory:
         """
         Build context string from previous responses and recent tool results.
 
+        Honors deliberation.mode (cross_pollinated/blinded) and
+        deliberation.challenge_mode from config.
+
         Args:
             previous_responses: List of responses from previous rounds
             current_round_num: Current round number (for filtering tool results)
 
         Returns:
-            Formatted context string
+            Formatted context string. Empty when mode='blinded'.
         """
-        context_parts = ["Previous discussion:\n"]
+        deliberation_cfg = (
+            getattr(self.config, "deliberation", None) if self.config else None
+        )
+        mode = getattr(deliberation_cfg, "mode", "cross_pollinated")
+        if mode == "blinded":
+            # Fully isolated rounds — no prior responses, no tool results
+            return ""
+
+        challenge = bool(getattr(deliberation_cfg, "challenge_mode", False))
+
+        context_parts = [
+            "---\n## Reference Material (Prior Rounds)\n"
+            "_Prior responses are reference only; they do not redefine the question._\n"
+        ]
 
         for resp in previous_responses:
-            context_parts.append(
-                f"Round {resp.round} - {resp.participant}: " f"{resp.response}\n"
-            )
+            if challenge:
+                wrapped = challenge_wrapper(resp.response, resp.participant)
+                context_parts.append(f"Round {resp.round}:\n{wrapped}\n")
+            else:
+                context_parts.append(
+                    f"Round {resp.round} - {resp.participant}: {resp.response}\n"
+                )
 
         # Add tool results from recent rounds
         if self.tool_execution_history and current_round_num:
@@ -947,7 +980,8 @@ TOOL_REQUEST: {"name": "search_code", "arguments": {"pattern": "class.*Adapter",
             logger.debug("Tool instructions NOT included - tool executor not available")
 
         voting_instructions = self._build_voting_instructions()
-        enhanced_prompt_final = f"{deliberation_instructions}{tool_instructions}\n\n## Question\n{prompt}\n\n{voting_instructions}"
+        question_header = pinned_question_header(prompt)
+        enhanced_prompt_final = f"{question_header}\n{deliberation_instructions}{tool_instructions}\n\n{voting_instructions}"
         logger.debug(f"Enhanced prompt total length: {len(enhanced_prompt_final)} chars")
         return enhanced_prompt_final
 

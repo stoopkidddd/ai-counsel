@@ -279,6 +279,34 @@ class DeliberationConfig(BaseModel):
         default_factory=VoteRetryConfig,
         description="Vote extraction retry settings",
     )
+    mode: Literal["cross_pollinated", "blinded"] = Field(
+        default="cross_pollinated",
+        description=(
+            "How participants see each other's prior responses. "
+            "'cross_pollinated' (default) = each round sees prior responses (current behavior). "
+            "'blinded' = each round is independent; no prior responses injected."
+        ),
+    )
+    challenge_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, wraps each prior response in critical-evaluation framing "
+            "before it's added to the next round's context. Reduces sycophancy. "
+            "No effect when mode='blinded' (no context to wrap)."
+        ),
+    )
+
+    def model_post_init(self, __context):
+        """Warn if challenge_mode is set with blinded mode (challenge requires context)."""
+        if self.mode == "blinded" and self.challenge_mode:
+            warnings.warn(
+                "deliberation.challenge_mode=true has no effect when "
+                "deliberation.mode='blinded' (no prior context to wrap). "
+                "Treating challenge_mode as False.",
+                UserWarning,
+                stacklevel=2,
+            )
+            object.__setattr__(self, "challenge_mode", False)
 
 
 class DecisionGraphConfig(BaseModel):

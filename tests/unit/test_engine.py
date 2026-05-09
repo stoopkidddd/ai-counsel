@@ -1515,3 +1515,130 @@ class TestEngineContextEfficiency:
 
         assert "Round 1" in context
         assert "Round 1 response" in context
+
+
+def _make_config(mode="cross_pollinated", challenge_mode=False):
+    """Build a minimal Config object exercising the new deliberation fields."""
+    from models.config import (
+        ConvergenceDetectionConfig,
+        DeliberationConfig,
+        EarlyStoppingConfig,
+    )
+
+    cd = ConvergenceDetectionConfig(
+        enabled=True,
+        semantic_similarity_threshold=0.85,
+        divergence_threshold=0.4,
+        min_rounds_before_check=1,
+        consecutive_stable_rounds=2,
+        stance_stability_threshold=0.8,
+        response_length_drop_threshold=0.4,
+    )
+    es = EarlyStoppingConfig(enabled=True, threshold=0.66, respect_min_rounds=True)
+    dc = DeliberationConfig(
+        convergence_detection=cd,
+        early_stopping=es,
+        convergence_threshold=0.8,
+        enable_convergence_detection=True,
+        mode=mode,
+        challenge_mode=challenge_mode,
+    )
+
+    class _Cfg:
+        deliberation = dc
+
+    return _Cfg()
+
+
+class TestDeliberationModes:
+    """Tests for prompt-layer enhancements (blinded mode, challenge mode, stance, pinned question)."""
+
+    def test_blinded_mode_skips_context(self):
+        """In blinded mode, _build_context returns empty string."""
+        engine = DeliberationEngine({}, config=_make_config(mode="blinded"))
+        previous = [
+            RoundResponse(
+                round=1,
+                participant="claude@opus",
+                response="Round 1 response",
+                timestamp=datetime.now().isoformat(),
+            )
+        ]
+        context = engine._build_context(previous, current_round_num=2)
+        assert context == ""
+
+    def test_cross_pollinated_default_includes_context(self):
+        """Default cross_pollinated mode includes prior responses."""
+        engine = DeliberationEngine({}, config=_make_config(mode="cross_pollinated"))
+        previous = [
+            RoundResponse(
+                round=1,
+                participant="claude@opus",
+                response="Round 1 response",
+                timestamp=datetime.now().isoformat(),
+            )
+        ]
+        context = engine._build_context(previous, current_round_num=2)
+        assert "Round 1 response" in context
+        assert "claude@opus" in context
+
+    def test_challenge_mode_wraps_responses(self):
+        """When challenge_mode is True, responses are wrapped in critical-evaluation framing."""
+        engine = DeliberationEngine(
+            {}, config=_make_config(mode="cross_pollinated", challenge_mode=True)
+        )
+        previous = [
+            RoundResponse(
+                round=1,
+                participant="claude@opus",
+                response="The proposal is sound.",
+                timestamp=datetime.now().isoformat(),
+            )
+        ]
+        context = engine._build_context(previous, current_round_num=2)
+        assert "evaluate critically" in context.lower() or "do not defer" in context.lower()
+        assert "The proposal is sound." in context
+
+    def test_challenge_disabled_when_blinded(self):
+        """challenge_mode is forced off when mode='blinded' (validated at config init)."""
+        # The DeliberationConfig.model_post_init coerces challenge_mode to False
+        cfg = _make_config(mode="blinded", challenge_mode=True)
+        assert cfg.deliberation.challenge_mode is False
+
+    def test_pinned_question_appears_first_in_enhanced_prompt(self):
+        """The pinned question header is the first content in enhanced prompts."""
+        engine = DeliberationEngine({}, config=_make_config())
+        out = engine._enhance_prompt_with_voting("Should we adopt strategy X?")
+        # Authoritative header marker must appear before any deliberation instructions
+        auth_idx = out.find("Original Question")
+        delib_idx = out.find("Deliberation Instructions")
+        assert auth_idx >= 0, "pinned header missing"
+        assert delib_idx >= 0
+        assert auth_idx < delib_idx, "pinned header must precede deliberation instructions"
+        assert "Should we adopt strategy X?" in out
+
+    @pytest.mark.asyncio
+    async def test_stance_applied_per_participant_only(self, mock_adapters):
+        """When one participant has stance='against', only their prompt gets the stance block."""
+        engine = DeliberationEngine(mock_adapters, config=_make_config())
+        participants = [
+            Participant(cli="claude", model="claude-3-5-sonnet"),  # no stance
+            Participant(cli="codex", model="gpt-4", stance="against"),
+        ]
+        mock_adapters["claude"].invoke_mock.return_value = "claude resp"
+        mock_adapters["codex"].invoke_mock.return_value = "codex resp"
+
+        await engine.execute_round(
+            round_num=1,
+            prompt="Pick A or B",
+            participants=participants,
+            previous_responses=[],
+        )
+
+        # Inspect the prompts each adapter received
+        claude_call_prompt = mock_adapters["claude"].invoke_mock.call_args.args[0]
+        codex_call_prompt = mock_adapters["codex"].invoke_mock.call_args.args[0]
+
+        assert "CRITICAL" not in claude_call_prompt  # no stance applied
+        assert "CRITICAL" in codex_call_prompt  # against stance applied
+        assert "OVERRIDE" in codex_call_prompt  # ethical override clause
