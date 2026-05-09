@@ -53,6 +53,20 @@ class DecisionNode(BaseModel):
         default_factory=dict,
         description="Extensible metadata dictionary for future fields",
     )
+    thread_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "UUID shared across all decisions in a continuation thread. "
+            "None for orphan/root decisions until they're continued."
+        ),
+    )
+    parent_decision_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "UUID of the immediate parent decision in a continuation thread. "
+            "None for the first decision in a thread."
+        ),
+    )
 
 
 class ParticipantStance(BaseModel):

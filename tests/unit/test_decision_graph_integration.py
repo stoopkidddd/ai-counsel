@@ -899,3 +899,123 @@ class TestDecisionGraphIntegrationMeasurementHooks:
         assert metrics.get("total_decisions", 0) == 0
         assert metrics.get("recent_100_count", 0) == 0
         assert metrics.get("recent_1000_count", 0) == 0
+
+
+class TestConversationThreading:
+    """Tests for cross-tool conversation threading (Plan B / B3+B4)."""
+
+    @pytest.fixture
+    def storage(self):
+        return DecisionGraphStorage(":memory:")
+
+    @pytest.fixture
+    def integration(self, storage):
+        return DecisionGraphIntegration(storage, enable_background_worker=False)
+
+    @pytest.fixture
+    def sample_result(self):
+        return DeliberationResult(
+            status="complete",
+            mode="test",
+            participants=["claude-opus@claude"],
+            rounds_completed=1,
+            full_debate=[],
+            summary=Summary(
+                consensus="Adopt approach X",
+                key_agreements=["unanimous"],
+                key_disagreements=[],
+                final_recommendation="proceed",
+            ),
+            convergence_info=ConvergenceInfo(
+                detected=True, status="converged", final_similarity=0.95
+            ),
+            voting_result=None,
+            transcript_path="/t.md",
+        )
+
+    def test_root_deliberation_has_no_thread_id(self, integration, sample_result, storage):
+        """A deliberation with no parent_decision_id is stored as orphan."""
+        decision_id = integration.store_deliberation("Q1", sample_result)
+        node = storage.get_decision_node(decision_id)
+        assert node.thread_id is None
+        assert node.parent_decision_id is None
+
+    def test_continuation_promotes_root_to_thread(
+        self, integration, sample_result, storage
+    ):
+        """Continuing from a root deliberation back-fills a fresh thread_id on the parent."""
+        root_id = integration.store_deliberation("Q1", sample_result)
+        child_id = integration.store_deliberation(
+            "Q2", sample_result, parent_decision_id=root_id
+        )
+
+        root = storage.get_decision_node(root_id)
+        child = storage.get_decision_node(child_id)
+
+        assert root.thread_id is not None
+        assert child.thread_id == root.thread_id  # same thread
+        assert child.parent_decision_id == root_id
+
+    def test_continuation_inherits_existing_thread_id(
+        self, integration, sample_result, storage
+    ):
+        """A third deliberation continuing from the child stays in the same thread."""
+        root_id = integration.store_deliberation("Q1", sample_result)
+        mid_id = integration.store_deliberation(
+            "Q2", sample_result, parent_decision_id=root_id
+        )
+        leaf_id = integration.store_deliberation(
+            "Q3", sample_result, parent_decision_id=mid_id
+        )
+
+        root = storage.get_decision_node(root_id)
+        leaf = storage.get_decision_node(leaf_id)
+        assert leaf.thread_id == root.thread_id
+        assert leaf.parent_decision_id == mid_id
+
+    def test_unknown_continuation_id_stores_as_orphan(
+        self, integration, sample_result, storage, caplog
+    ):
+        """Pointing at a non-existent parent stores cleanly without thread linkage."""
+        decision_id = integration.store_deliberation(
+            "Q1", sample_result, parent_decision_id="does-not-exist"
+        )
+        node = storage.get_decision_node(decision_id)
+        assert node.thread_id is None
+        assert node.parent_decision_id is None
+
+    def test_get_thread_context_returns_chain_in_order(
+        self, integration, sample_result, storage
+    ):
+        """get_thread_context returns prior decisions oldest-first, formatted as markdown."""
+        root_id = integration.store_deliberation("First Q", sample_result)
+        mid_id = integration.store_deliberation(
+            "Second Q", sample_result, parent_decision_id=root_id
+        )
+
+        # Continuing from mid: context should include both prior decisions
+        context, thread_id = integration.get_thread_context(mid_id)
+        assert thread_id is not None
+        assert "First Q" in context
+        assert "Second Q" in context
+        # Oldest first
+        assert context.index("First Q") < context.index("Second Q")
+        assert "Continuing From Previous Deliberation" in context
+
+    def test_get_thread_context_promotes_lonely_root(
+        self, integration, sample_result, storage
+    ):
+        """get_thread_context on a root with no thread_id back-fills one."""
+        root_id = integration.store_deliberation("Sole Q", sample_result)
+        assert storage.get_decision_node(root_id).thread_id is None
+
+        context, thread_id = integration.get_thread_context(root_id)
+        assert thread_id is not None
+        assert storage.get_decision_node(root_id).thread_id == thread_id
+        assert "Sole Q" in context
+
+    def test_get_thread_context_unknown_returns_empty(self, integration):
+        """get_thread_context with a missing decision id returns ('', None)."""
+        context, thread_id = integration.get_thread_context("does-not-exist")
+        assert context == ""
+        assert thread_id is None

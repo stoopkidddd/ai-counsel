@@ -189,6 +189,17 @@ The decision graph module (`decision_graph/`) enables persistent learning from d
 
 **Configuration**: See `config.yaml` for `decision_graph.enabled`, `db_path`, `similarity_threshold`, `max_context_decisions`
 
+**Conversation Threading (cross-tool sessions)**:
+
+MCP clients can chain `deliberate` and `query_decisions` calls into one logical session by passing `continuation_id`. When set, the engine joins the new deliberation onto the parent's thread and uses prior decisions in that thread as Round 1 context (instead of similarity-based retrieval).
+
+- **Schema**: `DecisionNode.thread_id` (UUID shared across decisions in a thread) and `parent_decision_id` (immediate parent UUID). Both nullable; orphan/root deliberations have `thread_id=None` until they're continued.
+- **Migration**: Automatic and idempotent — `DecisionGraphStorage._migrate_schema()` runs on every init, uses `PRAGMA table_info` to detect missing columns, and ALTERs in place. Existing DBs upgrade silently on next launch.
+- **Continuation contract**: Pass `continuation_id` (a prior `decision_id`) to either tool. The first continuation off a root promotes the root into a thread (back-fills a fresh `thread_id`). All subsequent continuations inherit that thread.
+- **Result echoes**: `DeliberationResult` returns `decision_id`, `continuation_id` (= decision_id, for convenience), and `thread_id`. Clients pass `decision_id` back as `continuation_id` to chain.
+- **Engine flow**: When `continuation_id` is set, `engine.execute()` calls `integration.get_thread_context(continuation_id)` instead of `get_context_for_deliberation()`. If the parent doesn't exist, falls back to similarity retrieval and stores the new decision as an orphan with a warning logged.
+- **`query_decisions`**: New `continuation_id` parameter scopes results to the thread (oldest first). Mutually exclusive with `query_text`/`find_contradictions`/`decision_id`.
+
 ### Evidence-Based Deliberation
 
 Enables AI models to gather concrete evidence during debates by executing tools. Tool results visible to ALL participants in subsequent rounds.

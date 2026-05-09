@@ -333,6 +333,16 @@ async def list_tools() -> list[Tool]:
                     "type": "string",
                     "description": "Working directory for tool execution (tools resolve relative paths from here). Should be the client's current working directory.",
                 },
+                "continuation_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional UUID of a prior decision to continue from "
+                        "(echoed back as decision_id from a previous deliberate "
+                        "result). Links this deliberation into the same thread "
+                        "and uses prior decisions in that thread as Round 1 "
+                        "context instead of similarity-based retrieval."
+                    ),
+                },
             },
             "required": ["question", "participants", "working_directory"],
         },
@@ -418,6 +428,14 @@ async def list_tools() -> list[Tool]:
                             "enum": ["summary", "detailed", "json"],
                             "default": "summary",
                             "description": "Output format",
+                        },
+                        "continuation_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional UUID; when set, scopes results to "
+                                "the continuation thread containing this "
+                                "decision (oldest first)."
+                            ),
                         },
                     },
                 },
@@ -728,6 +746,7 @@ async def handle_query_decisions(arguments: dict) -> list[TextContent]:
         query_text = arguments.get("query_text")
         find_contradictions = arguments.get("find_contradictions", False)
         decision_id = arguments.get("decision_id")
+        continuation_id = arguments.get("continuation_id")
         limit = arguments.get("limit", 5)
         threshold = arguments.get("threshold", 0.6)
         format_type = arguments.get("format", "summary")
@@ -736,14 +755,15 @@ async def handle_query_decisions(arguments: dict) -> list[TextContent]:
         provided_params = sum([
             bool(query_text),
             bool(find_contradictions),
-            bool(decision_id)
+            bool(decision_id),
+            bool(continuation_id),
         ])
 
         if provided_params == 0:
             return [TextContent(
                 type="text",
                 text=json.dumps({
-                    "error": "Must provide one of: query_text, find_contradictions, or decision_id",
+                    "error": "Must provide one of: query_text, find_contradictions, decision_id, or continuation_id",
                     "status": "failed"
                 }, indent=2)
             )]
@@ -752,12 +772,13 @@ async def handle_query_decisions(arguments: dict) -> list[TextContent]:
             return [TextContent(
                 type="text",
                 text=json.dumps({
-                    "error": "Only one of query_text, find_contradictions, or decision_id can be provided",
+                    "error": "Only one of query_text, find_contradictions, decision_id, or continuation_id can be provided",
                     "status": "failed",
                     "provided": {
                         "query_text": bool(query_text),
                         "find_contradictions": bool(find_contradictions),
-                        "decision_id": bool(decision_id)
+                        "decision_id": bool(decision_id),
+                        "continuation_id": bool(continuation_id),
                     }
                 }, indent=2)
             )]
@@ -932,6 +953,19 @@ async def handle_query_decisions(arguments: dict) -> list[TextContent]:
                     "rounds": len(timeline.rounds),
                     "related_decisions": timeline.related_decisions[:3],
                 }
+
+        elif continuation_id:
+            # Return all decisions in the continuation thread (oldest first)
+            thread_decisions = engine.search_in_thread(continuation_id, limit=limit)
+            result = {
+                "type": "thread",
+                "continuation_id": continuation_id,
+                "thread_id": (
+                    thread_decisions[0].thread_id if thread_decisions else None
+                ),
+                "count": len(thread_decisions),
+                "decisions": [format_decision(d) for d in thread_decisions],
+            }
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

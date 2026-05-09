@@ -1080,15 +1080,37 @@ TOOL_REQUEST: {"name": "search_code", "arguments": {"pattern": "class.*Adapter",
         progress_logger.info(f"   Working Dir: {request.working_directory}")
         progress_logger.info("-" * 70)
 
-        # Retrieve decision graph context if enabled
+        # Retrieve decision graph context if enabled.
+        # When a continuation_id is provided, use thread-based context
+        # (replaces similarity-based retrieval for cleaner semantics).
         graph_context = ""
+        continuation_thread_id: Optional[str] = None
+        continuation_id = getattr(request, "continuation_id", None)
         if self.graph_integration:
             try:
-                # Use new config-based approach (deprecated params removed)
-                graph_context = self.graph_integration.get_context_for_deliberation(
-                    request.question
-                )
-                if graph_context:
+                if continuation_id:
+                    graph_context, continuation_thread_id = (
+                        self.graph_integration.get_thread_context(continuation_id)
+                    )
+                    if graph_context:
+                        logger.info(
+                            f"Retrieved thread context for continuation_id={continuation_id}"
+                        )
+                    else:
+                        logger.warning(
+                            f"continuation_id={continuation_id} did not resolve to "
+                            "thread context; falling back to similarity-based retrieval"
+                        )
+                        graph_context = (
+                            self.graph_integration.get_context_for_deliberation(
+                                request.question
+                            )
+                        )
+                else:
+                    graph_context = self.graph_integration.get_context_for_deliberation(
+                        request.question
+                    )
+                if graph_context and not continuation_id:
                     logger.info("Retrieved decision graph context for question")
             except Exception as e:
                 logger.warning(f"Error retrieving graph context: {e}")
@@ -1396,13 +1418,29 @@ TOOL_REQUEST: {"name": "search_code", "arguments": {"pattern": "class.*Adapter",
             transcript_path = self.transcript_manager.save(result, request.question)
             result.transcript_path = transcript_path
 
-        # Store deliberation in decision graph if enabled
+        # Store deliberation in decision graph if enabled.
+        # If a continuation_id was provided, link this decision to that thread.
         if self.graph_integration:
             try:
                 decision_id = self.graph_integration.store_deliberation(
-                    request.question, result
+                    request.question,
+                    result,
+                    parent_decision_id=continuation_id,
                 )
                 logger.info(f"Stored deliberation in decision graph: {decision_id}")
+
+                # Populate continuation fields on the result so clients can chain calls
+                result.decision_id = decision_id
+                result.continuation_id = decision_id
+                # Read back to obtain the thread_id (set inside store_deliberation
+                # when a parent was provided, or remains None for orphan roots)
+                stored_node = self.graph_integration.storage.get_decision_node(
+                    decision_id
+                )
+                if stored_node is not None:
+                    result.thread_id = stored_node.thread_id
+                elif continuation_thread_id is not None:
+                    result.thread_id = continuation_thread_id
             except Exception as e:
                 logger.warning(f"Error storing deliberation in graph: {e}")
 

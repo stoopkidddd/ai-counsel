@@ -73,6 +73,15 @@ class DeliberateRequest(BaseModel):
         ...,
         description="Working directory for tool execution (tools resolve relative paths from here). Required for deliberations using evidence-based tools."
     )
+    continuation_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional UUID of a prior decision to continue from. When set, the engine "
+            "links this deliberation into the same thread (sets parent_decision_id and "
+            "thread_id) and uses prior decisions in the thread as Round 1 context "
+            "instead of similarity-based retrieval."
+        ),
+    )
 
 
 class RoundResponse(BaseModel):
@@ -211,4 +220,19 @@ class DeliberationResult(BaseModel):
     tool_executions: Optional[list] = Field(
         default_factory=list,
         description="List of tool executions during deliberation (evidence-based deliberation)",
+    )
+    decision_id: Optional[str] = Field(
+        default=None,
+        description="UUID of this deliberation's stored decision graph node (None when graph disabled)",
+    )
+    continuation_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "UUID echoing decision_id; pass to a follow-up deliberate or query_decisions "
+            "call to continue this thread."
+        ),
+    )
+    thread_id: Optional[str] = Field(
+        default=None,
+        description="UUID of the continuation thread this decision belongs to (None for orphan deliberations)",
     )

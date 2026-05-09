@@ -102,7 +102,12 @@ class DecisionGraphIntegration:
             await self.worker.start()
             logger.info("Started background worker for similarity computation")
 
-    def store_deliberation(self, question: str, result: DeliberationResult) -> str:
+    def store_deliberation(
+        self,
+        question: str,
+        result: DeliberationResult,
+        parent_decision_id: Optional[str] = None,
+    ) -> str:
         """Store completed deliberation in decision graph.
 
         Extracts data from DeliberationResult and saves:
@@ -113,6 +118,9 @@ class DecisionGraphIntegration:
         Args:
             question: The deliberation question
             result: DeliberationResult from deliberation engine
+            parent_decision_id: Optional UUID of a prior decision to link as parent.
+                When set, this deliberation joins the parent's thread (back-filling
+                a thread_id on the parent if it was a root deliberation).
 
         Returns:
             The decision node ID (UUID)
@@ -145,6 +153,27 @@ class DecisionGraphIntegration:
             if result.convergence_info and result.convergence_info.status:
                 convergence_status = result.convergence_info.status
 
+            # Resolve thread_id from parent (back-fill root parent if needed)
+            thread_id: Optional[str] = None
+            if parent_decision_id:
+                parent = self.storage.get_decision_node(parent_decision_id)
+                if parent is None:
+                    logger.warning(
+                        f"parent_decision_id={parent_decision_id} not found; "
+                        "storing without thread linkage"
+                    )
+                    parent_decision_id = None
+                else:
+                    if parent.thread_id:
+                        thread_id = parent.thread_id
+                    else:
+                        # Promote root parent into a thread
+                        thread_id = str(uuid4())
+                        self.storage.set_thread_id(parent_decision_id, thread_id)
+                        logger.info(
+                            f"Promoted decision {parent_decision_id} to thread {thread_id}"
+                        )
+
             # Create decision node
             node = DecisionNode(
                 id=str(uuid4()),
@@ -155,6 +184,8 @@ class DecisionGraphIntegration:
                 convergence_status=convergence_status,
                 participants=result.participants,
                 transcript_path=result.transcript_path or "",
+                thread_id=thread_id,
+                parent_decision_id=parent_decision_id,
             )
 
             # Save decision node
@@ -433,6 +464,64 @@ class DecisionGraphIntegration:
             f"tokens={tokens_used}/{token_budget}, "
             f"db_size={db_size}"
         )
+
+    def get_thread_context(
+        self,
+        parent_decision_id: str,
+        max_decisions: int = 5,
+    ) -> tuple[str, Optional[str]]:
+        """Build markdown context from prior decisions in a continuation thread.
+
+        When a caller passes ``continuation_id`` to ``deliberate``, this returns
+        the chain of prior decisions in the thread (oldest first) formatted as
+        markdown for injection into Round 1. If the parent has no thread_id yet,
+        a new one is generated and back-filled (turning the root into a thread).
+
+        Args:
+            parent_decision_id: UUID of the decision to continue from.
+            max_decisions: Maximum prior decisions to include.
+
+        Returns:
+            (markdown_context, thread_id). If the parent doesn't exist, returns
+            ('', None) and the caller should fall back to similarity-based context.
+        """
+        parent = self.storage.get_decision_node(parent_decision_id)
+        if parent is None:
+            logger.warning(
+                f"continuation_id={parent_decision_id} not found in decision graph"
+            )
+            return "", None
+
+        thread_id = parent.thread_id
+        if thread_id is None:
+            # Root parent — promote to a thread so the new decision can join it
+            thread_id = str(uuid4())
+            self.storage.set_thread_id(parent_decision_id, thread_id)
+            chain = [parent]
+        else:
+            chain = self.storage.get_decisions_by_thread(thread_id, limit=max_decisions)
+
+        if not chain:
+            return "", thread_id
+
+        lines = [
+            "## Continuing From Previous Deliberation",
+            (
+                "_The decisions below are prior turns in this thread. "
+                "Use them as context, but the question above remains authoritative._"
+            ),
+            "",
+        ]
+        for idx, node in enumerate(chain, start=1):
+            lines.append(f"### Prior decision {idx} ({node.timestamp.isoformat()})")
+            lines.append(f"- **Question:** {node.question}")
+            lines.append(f"- **Consensus:** {node.consensus or '(none recorded)'}")
+            if node.winning_option:
+                lines.append(f"- **Winning option:** {node.winning_option}")
+            lines.append(f"- **Convergence:** {node.convergence_status}")
+            lines.append("")
+
+        return "\n".join(lines), thread_id
 
     def get_context_for_deliberation(
         self,

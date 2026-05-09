@@ -917,3 +917,119 @@ class TestStorageEdgeCases:
         # Verify nothing was saved
         retrieved = storage.get_decision_node("test-id")
         assert retrieved is None
+
+
+class TestThreadingMigration:
+    """Tests for the conversation-threading schema migration (Plan B / B2)."""
+
+    def test_migration_adds_thread_columns_idempotently(self, tmp_path):
+        """Initialising twice over the same file is safe and produces the threading columns."""
+        db_path = str(tmp_path / "graph.db")
+        s1 = DecisionGraphStorage(db_path)
+        cols = {row[1] for row in s1.conn.execute("PRAGMA table_info(decision_nodes)").fetchall()}
+        assert "thread_id" in cols
+        assert "parent_decision_id" in cols
+        s1.close()
+
+        # Re-open without errors
+        s2 = DecisionGraphStorage(db_path)
+        cols2 = {row[1] for row in s2.conn.execute("PRAGMA table_info(decision_nodes)").fetchall()}
+        assert cols == cols2
+
+    def test_migration_upgrades_legacy_db(self, tmp_path):
+        """A pre-existing DB without threading columns gets ALTER TABLE'd in place."""
+        db_path = str(tmp_path / "legacy.db")
+        # Create a database with the OLD schema (no thread columns)
+        legacy = sqlite3.connect(db_path)
+        legacy.execute(
+            """
+            CREATE TABLE decision_nodes (
+                id TEXT PRIMARY KEY,
+                question TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                consensus TEXT NOT NULL,
+                winning_option TEXT,
+                convergence_status TEXT NOT NULL,
+                participants TEXT NOT NULL,
+                transcript_path TEXT NOT NULL,
+                metadata TEXT
+            )
+            """
+        )
+        legacy.execute(
+            "INSERT INTO decision_nodes VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy-1",
+                "old question",
+                "2026-01-01T00:00:00",
+                "old consensus",
+                None,
+                "converged",
+                '["x@y"]',
+                "/t",
+                None,
+            ),
+        )
+        legacy.commit()
+        legacy.close()
+
+        # Storage migration must add the columns
+        storage = DecisionGraphStorage(db_path)
+        cols = {row[1] for row in storage.conn.execute("PRAGMA table_info(decision_nodes)").fetchall()}
+        assert "thread_id" in cols
+        assert "parent_decision_id" in cols
+
+        # Legacy data is preserved with NULL threading values
+        legacy_node = storage.get_decision_node("legacy-1")
+        assert legacy_node is not None
+        assert legacy_node.thread_id is None
+        assert legacy_node.parent_decision_id is None
+        assert legacy_node.question == "old question"
+
+    def test_thread_indexes_created(self, storage):
+        """Threading indexes exist on decision_nodes."""
+        cursor = storage.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='decision_nodes'"
+        )
+        index_names = {row[0] for row in cursor.fetchall()}
+        assert "idx_decision_thread" in index_names
+        assert "idx_decision_parent" in index_names
+
+    def test_set_thread_id_backfills_existing_decision(self, storage):
+        """set_thread_id updates an existing decision in place."""
+        node = DecisionNode(
+            id="root-1",
+            question="q",
+            timestamp=datetime.now(),
+            consensus="c",
+            convergence_status="converged",
+            participants=["x@y"],
+            transcript_path="/t",
+        )
+        storage.save_decision_node(node)
+        assert storage.get_decision_node("root-1").thread_id is None
+
+        storage.set_thread_id("root-1", "thr-xyz")
+        assert storage.get_decision_node("root-1").thread_id == "thr-xyz"
+
+    def test_get_decisions_by_thread_returns_oldest_first(self, storage):
+        """get_decisions_by_thread orders by timestamp ascending."""
+        from datetime import timedelta
+
+        base = datetime(2026, 1, 1, 0, 0, 0)
+        for i, ts_offset in enumerate([2, 0, 1]):  # save out of order
+            node = DecisionNode(
+                id=f"d{i}",
+                question=f"q{i}",
+                timestamp=base + timedelta(minutes=ts_offset),
+                consensus="c",
+                convergence_status="converged",
+                participants=["x@y"],
+                transcript_path="/t",
+                thread_id="thr-A",
+            )
+            storage.save_decision_node(node)
+
+        chain = storage.get_decisions_by_thread("thr-A")
+        # Sorted ascending by timestamp: ts=0 (d1), ts=1 (d2), ts=2 (d0)
+        assert [d.id for d in chain] == ["d1", "d2", "d0"]

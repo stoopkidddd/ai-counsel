@@ -212,7 +212,38 @@ class DecisionGraphStorage:
             """
             )
 
+            # Apply additive migrations (e.g., conversation threading columns)
+            self._migrate_schema(conn)
+
             logger.debug("Database schema and indexes initialized successfully")
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Apply additive schema migrations on top of the base schema.
+
+        Idempotent: every step checks current state via PRAGMA table_info or
+        sqlite_master before issuing DDL. Safe to run on every startup.
+        """
+        cursor = conn.execute("PRAGMA table_info(decision_nodes)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "thread_id" not in existing_columns:
+            conn.execute("ALTER TABLE decision_nodes ADD COLUMN thread_id TEXT")
+            logger.info("Migration: added decision_nodes.thread_id column")
+        if "parent_decision_id" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE decision_nodes ADD COLUMN parent_decision_id TEXT"
+            )
+            logger.info("Migration: added decision_nodes.parent_decision_id column")
+
+        # Indexes for thread-based queries (continuation lookup + parent traversal)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_decision_thread "
+            "ON decision_nodes(thread_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_decision_parent "
+            "ON decision_nodes(parent_decision_id)"
+        )
 
     def _verify_schema(self) -> bool:
         """Verify that the database schema was properly created.
@@ -267,8 +298,9 @@ class DecisionGraphStorage:
                 """
                 INSERT INTO decision_nodes (
                     id, question, timestamp, consensus, winning_option,
-                    convergence_status, participants, transcript_path, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    convergence_status, participants, transcript_path, metadata,
+                    thread_id, parent_decision_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     node.id,
@@ -280,10 +312,41 @@ class DecisionGraphStorage:
                     json.dumps(node.participants),
                     node.transcript_path,
                     json.dumps(node.metadata) if node.metadata else None,
+                    node.thread_id,
+                    node.parent_decision_id,
                 ),
             )
             logger.info(f"Saved decision node {node.id}")
             return node.id
+
+    def set_thread_id(self, decision_id: str, thread_id: str) -> None:
+        """Back-fill thread_id on an existing decision (used when continuing a root)."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE decision_nodes SET thread_id = ? WHERE id = ?",
+                (thread_id, decision_id),
+            )
+            logger.debug(
+                f"Set thread_id={thread_id} on decision {decision_id}"
+            )
+
+    def get_decisions_by_thread(
+        self, thread_id: str, limit: int = 50
+    ) -> List[DecisionNode]:
+        """Return decisions in a thread, oldest first (so order matches deliberation flow)."""
+        cursor = self.conn.execute(
+            """
+            SELECT id, question, timestamp, consensus, winning_option,
+                   convergence_status, participants, transcript_path, metadata,
+                   thread_id, parent_decision_id
+            FROM decision_nodes
+            WHERE thread_id = ?
+            ORDER BY timestamp ASC
+            LIMIT ?
+            """,
+            (thread_id, limit),
+        )
+        return [self._row_to_decision_node(row) for row in cursor.fetchall()]
 
     def get_decision_node(self, decision_id: str) -> Optional[DecisionNode]:
         """Retrieve a decision node by ID.
@@ -297,7 +360,8 @@ class DecisionGraphStorage:
         cursor = self.conn.execute(
             """
             SELECT id, question, timestamp, consensus, winning_option,
-                   convergence_status, participants, transcript_path, metadata
+                   convergence_status, participants, transcript_path, metadata,
+                   thread_id, parent_decision_id
             FROM decision_nodes
             WHERE id = ?
             """,
@@ -326,7 +390,8 @@ class DecisionGraphStorage:
         cursor = self.conn.execute(
             """
             SELECT id, question, timestamp, consensus, winning_option,
-                   convergence_status, participants, transcript_path, metadata
+                   convergence_status, participants, transcript_path, metadata,
+                   thread_id, parent_decision_id
             FROM decision_nodes
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
@@ -450,6 +515,7 @@ class DecisionGraphStorage:
             SELECT
                 dn.id, dn.question, dn.timestamp, dn.consensus, dn.winning_option,
                 dn.convergence_status, dn.participants, dn.transcript_path, dn.metadata,
+                dn.thread_id, dn.parent_decision_id,
                 ds.similarity_score
             FROM decision_similarities ds
             JOIN decision_nodes dn ON ds.target_id = dn.id
@@ -488,6 +554,10 @@ class DecisionGraphStorage:
         Returns:
             DecisionNode instance
         """
+        # row may be a sqlite3.Row (column-keyed) — use defensive access for the
+        # threading columns since rows from older SELECTs (e.g., similarity joins)
+        # may pre-date the migration. sqlite3.Row supports __contains__ via .keys().
+        row_keys = row.keys() if hasattr(row, "keys") else ()
         return DecisionNode(
             id=row["id"],
             question=row["question"],
@@ -498,6 +568,10 @@ class DecisionGraphStorage:
             participants=json.loads(row["participants"]),
             transcript_path=row["transcript_path"],
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
+            thread_id=row["thread_id"] if "thread_id" in row_keys else None,
+            parent_decision_id=(
+                row["parent_decision_id"] if "parent_decision_id" in row_keys else None
+            ),
         )
 
     def _row_to_participant_stance(self, row: sqlite3.Row) -> ParticipantStance:

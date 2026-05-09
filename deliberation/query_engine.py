@@ -327,6 +327,38 @@ class QueryEngine:
             logger.error(f"Error finding related decisions: {e}")
             return []
 
+    def search_in_thread(
+        self, decision_or_thread_id: str, limit: int = 20
+    ) -> list:
+        """Return decisions in a continuation thread, oldest first.
+
+        Resolves the input to a thread by either treating it as a decision_id
+        (looking up its thread_id) or as a thread_id directly. Returns an empty
+        list if the input matches neither and the decision has no thread.
+
+        Args:
+            decision_or_thread_id: Either a decision UUID (preferred) or a
+                thread UUID. The MCP layer typically passes a continuation_id
+                which is itself a decision UUID.
+            limit: Max decisions to return.
+
+        Returns:
+            List of DecisionNode (oldest first). Empty list if no thread found.
+        """
+        # Try decision_id first
+        node = self.storage.get_decision_node(decision_or_thread_id)
+        if node is not None:
+            if node.thread_id:
+                return self.storage.get_decisions_by_thread(
+                    node.thread_id, limit=limit
+                )
+            # Decision exists but is a root with no thread yet — return just it
+            return [node]
+        # Fall back to treating the input as a thread_id directly
+        return self.storage.get_decisions_by_thread(
+            decision_or_thread_id, limit=limit
+        )
+
     def get_search_diagnostics(
         self, query: str, limit: int = 5, threshold: float = 0.6
     ) -> dict:

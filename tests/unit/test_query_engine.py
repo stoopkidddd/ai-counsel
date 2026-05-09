@@ -446,3 +446,73 @@ class TestQueryEngineIntegration:
         await engine.search_similar("test", limit=5)
         search_time = time.time() - start
         assert search_time < 1.0  # Should be fast with small dataset
+
+
+class TestSearchInThread:
+    """Tests for QueryEngine.search_in_thread (Plan B / B6)."""
+
+    def test_search_by_decision_id_returns_full_thread(self, storage):
+        """Passing any decision in a thread returns all its peers, oldest first."""
+        from datetime import timedelta
+
+        base = datetime(2026, 1, 1, 0, 0, 0)
+        ids = []
+        for i in range(3):
+            node = DecisionNode(
+                id=f"d{i}",
+                question=f"Q{i}",
+                timestamp=base + timedelta(minutes=i),
+                consensus="c",
+                convergence_status="converged",
+                participants=["x@y"],
+                transcript_path="/t",
+                thread_id="thr-A",
+                parent_decision_id=f"d{i-1}" if i > 0 else None,
+            )
+            storage.save_decision_node(node)
+            ids.append(node.id)
+
+        engine = QueryEngine(storage)
+        # Pass the *middle* decision: should still get the whole thread
+        result = engine.search_in_thread("d1")
+        assert [d.id for d in result] == ids
+
+    def test_search_by_thread_id_directly(self, storage):
+        """Passing a thread_id (not a decision_id) also resolves the thread."""
+        node = DecisionNode(
+            id="x1",
+            question="Q",
+            timestamp=datetime.now(),
+            consensus="c",
+            convergence_status="converged",
+            participants=["x@y"],
+            transcript_path="/t",
+            thread_id="thr-Z",
+        )
+        storage.save_decision_node(node)
+
+        engine = QueryEngine(storage)
+        result = engine.search_in_thread("thr-Z")
+        assert [d.id for d in result] == ["x1"]
+
+    def test_search_with_unknown_id_returns_empty(self, storage):
+        """A bogus id returns []."""
+        engine = QueryEngine(storage)
+        assert engine.search_in_thread("nope") == []
+
+    def test_search_root_with_no_thread_returns_just_that_decision(self, storage):
+        """A decision that has not been continued returns only itself."""
+        node = DecisionNode(
+            id="root1",
+            question="Q",
+            timestamp=datetime.now(),
+            consensus="c",
+            convergence_status="converged",
+            participants=["x@y"],
+            transcript_path="/t",
+        )
+        storage.save_decision_node(node)
+
+        engine = QueryEngine(storage)
+        result = engine.search_in_thread("root1")
+        assert [d.id for d in result] == ["root1"]
