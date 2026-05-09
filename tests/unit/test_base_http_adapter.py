@@ -235,6 +235,10 @@ class TestHTTPAdapterInvoke:
 
         mock_response = Mock()
         mock_response.status_code = 400
+        # Real httpx.Response exposes .json() and .text on errors so the adapter
+        # can log the body. Mock both so the error-logging branch doesn't blow up.
+        mock_response.json = Mock(side_effect=ValueError("not JSON"))
+        mock_response.text = "Bad Request: invalid model"
         mock_response.raise_for_status = Mock(
             side_effect=httpx.HTTPStatusError(
                 "400 Bad Request",

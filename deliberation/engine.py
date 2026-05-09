@@ -337,9 +337,18 @@ The following files are available in the working directory:
                                 f"response_length={len(retry_response)} chars"
                             )
 
+                            # Strip TOOL_REQUEST markers from the retry: the retry
+                            # asks for a vote, not new tool calls, and any tools in
+                            # the original response have already been parsed/executed.
+                            # Re-parsing them would cause double-execution.
+                            sanitized_retry = "\n".join(
+                                line for line in retry_response.split("\n")
+                                if "TOOL_REQUEST:" not in line
+                            )
+
                             # Append retry response to original for vote extraction
                             # This preserves the full analysis while adding the explicit vote
-                            response_text = f"{response_text}\n\n---\n\n[Vote Retry Response]\n{retry_response}"
+                            response_text = f"{response_text}\n\n---\n\n[Vote Retry Response]\n{sanitized_retry}"
 
                             # Check if retry was successful (has VOTE marker now)
                             if not self._needs_vote_retry(retry_response):

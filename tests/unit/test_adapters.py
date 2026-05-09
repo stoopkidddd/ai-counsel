@@ -159,31 +159,45 @@ class TestClaudeAdapter:
 
 
 class TestClaudeReasoningEffort:
-    """Tests for ClaudeAdapter reasoning_effort support (Opus 4.6+ only)."""
+    """Tests for ClaudeAdapter reasoning_effort support (Opus 4.7 / Sonnet 4.6+)."""
 
     def test_valid_reasoning_efforts(self):
-        """Test ClaudeAdapter accepts valid reasoning effort values."""
+        """Test ClaudeAdapter accepts valid reasoning effort values.
+
+        Opus 4.7 and Sonnet 4.6+ accept low/medium/high/xhigh/max.
+        """
         adapter = ClaudeAdapter(args=["-p", "--model", "{model}", "{prompt}"])
 
         assert "low" in adapter.VALID_REASONING_EFFORTS
         assert "medium" in adapter.VALID_REASONING_EFFORTS
         assert "high" in adapter.VALID_REASONING_EFFORTS
-        # Claude does not support xhigh (that's Codex-only)
-        assert "xhigh" not in adapter.VALID_REASONING_EFFORTS
+        assert "xhigh" in adapter.VALID_REASONING_EFFORTS
+        assert "max" in adapter.VALID_REASONING_EFFORTS
 
     def test_is_opus_model_detection(self):
-        """Test _is_opus_model correctly identifies Opus models."""
-        assert ClaudeAdapter._is_opus_model("opus") is True
-        assert ClaudeAdapter._is_opus_model("opus") is True
+        """Test _is_opus_model identifies models that support effort levels.
+
+        Despite the name, this gates effort-level support generally — currently
+        Opus 4.7 and Sonnet 4.6+. Aliases like "opus"/"sonnet"/"haiku" are not
+        recognised; participants must pass full model IDs.
+        """
+        # Models with effort-level support
+        assert ClaudeAdapter._is_opus_model("claude-opus-4-7") is True
+        assert ClaudeAdapter._is_opus_model("claude-sonnet-4-6") is True
+
+        # Older Sonnet versions don't support effort
         assert ClaudeAdapter._is_opus_model("claude-sonnet-4-5-20250929") is False
+        # Haiku never supports effort
+        assert ClaudeAdapter._is_opus_model("claude-haiku-4-5-20251001") is False
+        # Aliases are not full model IDs and don't pass the prefix check
+        assert ClaudeAdapter._is_opus_model("opus") is False
         assert ClaudeAdapter._is_opus_model("sonnet") is False
         assert ClaudeAdapter._is_opus_model("haiku") is False
-        assert ClaudeAdapter._is_opus_model("claude-haiku-4-5-20251001") is False
 
     @pytest.mark.asyncio
     @patch("adapters.base.asyncio.create_subprocess_exec")
     async def test_opus_with_reasoning_effort_injects_flag(self, mock_subprocess):
-        """Test reasoning_effort injects --effort flag for Opus models."""
+        """Test reasoning_effort injects --effort flag for Opus 4.7."""
         mock_process = Mock()
         mock_process.communicate = AsyncMock(return_value=(b"Response", b""))
         mock_process.returncode = 0
@@ -195,7 +209,7 @@ class TestClaudeReasoningEffort:
         )
         await adapter.invoke(
             prompt="Test prompt",
-            model="opus",
+            model="claude-opus-4-7",
             reasoning_effort="high",
         )
 
@@ -250,8 +264,8 @@ class TestClaudeReasoningEffort:
         with pytest.raises(ValueError, match="Invalid reasoning_effort"):
             await adapter.invoke(
                 prompt="Test prompt",
-                model="opus",
-                reasoning_effort="xhigh",
+                model="claude-opus-4-7",
+                reasoning_effort="ultra",  # not in {low, medium, high, xhigh, max}
             )
 
         mock_subprocess.assert_not_called()
@@ -282,13 +296,13 @@ class TestClaudeReasoningEffort:
         with pytest.raises(ValueError, match="Invalid default_reasoning_effort"):
             ClaudeAdapter(
                 args=["-p", "--model", "{model}", "{prompt}"],
-                default_reasoning_effort="xhigh",
+                default_reasoning_effort="ultra",  # not in {low, medium, high, xhigh, max}
             )
 
     @pytest.mark.asyncio
     @patch("adapters.base.asyncio.create_subprocess_exec")
     async def test_default_effort_used_for_opus(self, mock_subprocess):
-        """Test default_reasoning_effort is applied for Opus when no runtime effort."""
+        """Test default_reasoning_effort is applied for Opus 4.7 when no runtime effort."""
         mock_process = Mock()
         mock_process.communicate = AsyncMock(return_value=(b"Response", b""))
         mock_process.returncode = 0
@@ -300,7 +314,7 @@ class TestClaudeReasoningEffort:
         )
         await adapter.invoke(
             prompt="Test prompt",
-            model="opus",
+            model="claude-opus-4-7",
         )
 
         mock_subprocess.assert_called_once()
