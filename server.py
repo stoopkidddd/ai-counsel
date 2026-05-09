@@ -17,6 +17,7 @@ The internal tools are executed by the DeliberationEngine, not the MCP client.
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -32,15 +33,17 @@ from deliberation.metrics import get_quality_tracker
 from deliberation.query_engine import QueryEngine
 from models.config import AdapterConfig, CLIToolConfig, load_config
 from models.model_registry import ModelRegistry
+from models.paths import data_dir
 from models.schema import DeliberateRequest
 
-# Project directory (where server.py is located) - for config and logs
+# Project directory (where server.py is located) - for bundled config fallback
 PROJECT_DIR = Path(__file__).parent.absolute()
 # Working directory (where server was started from) - for transcripts
 WORK_DIR = Path.cwd()
 
-# Configure logging to file in project directory
-log_file = PROJECT_DIR / "mcp_server.log"
+
+# Configure logging to file in user data directory
+log_file = data_dir() / "mcp_server.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -56,9 +59,31 @@ logger = logging.getLogger(__name__)
 app = Server("ai-counsel")
 
 
-# Load configuration from project directory
+def _resolve_config_path() -> Path:
+    """Locate config.yaml. Search order: $AI_COUNSEL_CONFIG, CWD, bundled default."""
+    override = os.environ.get("AI_COUNSEL_CONFIG")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"AI_COUNSEL_CONFIG points to missing file: {path}"
+            )
+        return path
+    cwd_config = Path.cwd() / "config.yaml"
+    if cwd_config.is_file():
+        return cwd_config
+    bundled = PROJECT_DIR / "config.yaml"
+    if bundled.is_file():
+        return bundled
+    raise FileNotFoundError(
+        "config.yaml not found. Set AI_COUNSEL_CONFIG, place config.yaml in the "
+        "current working directory, or reinstall the package (bundled default missing)."
+    )
+
+
+# Load configuration
 try:
-    config_path = PROJECT_DIR / "config.yaml"
+    config_path = _resolve_config_path()
     logger.info(f"Loading config from: {config_path}")
     config = load_config(str(config_path))
     logger.info("Configuration loaded successfully")
@@ -696,10 +721,7 @@ async def handle_set_session_models(arguments: dict) -> list[TextContent]:
 async def handle_query_decisions(arguments: dict) -> list[TextContent]:
     """Handle query_decisions tool call."""
     try:
-        db_path = Path(getattr(config.decision_graph, "db_path", "decision_graph.db"))
-        # Make db_path absolute - if relative, resolve from project directory
-        if not db_path.is_absolute():
-            db_path = PROJECT_DIR / db_path
+        db_path = getattr(config.decision_graph, "db_path", "decision_graph.db")
         storage = DecisionGraphStorage(str(db_path))
         engine = QueryEngine(storage, config=config.decision_graph)
 
@@ -968,5 +990,10 @@ async def main():
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Synchronous entry point for the `ai-counsel` console script."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    cli()

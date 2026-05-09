@@ -15,6 +15,41 @@ True deliberative consensus MCP server where AI models debate and refine positio
 ![MCP](https://img.shields.io/badge/MCP-Server-green.svg)
 ![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)
 
+## Install
+
+Add this to your MCP client config (e.g. `.mcp.json` in your project, or your Claude Desktop / Cursor MCP settings):
+
+```json
+{
+  "mcpServers": {
+    "ai-counsel": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/stoopkidddd/ai-counsel@v0.1.0",
+        "ai-counsel"
+      ]
+    }
+  }
+}
+```
+
+That's it — [`uvx`](https://github.com/astral-sh/uv) downloads, builds, and caches the server on first launch. Pin to a tag (`@v0.1.0`) or commit (`@<sha>`) for reproducibility; use `@main` to track the tip of `main`.
+
+For the optional ML convergence backends (scikit-learn + sentence-transformers), swap the `--from` spec:
+
+```json
+"args": [
+  "--from",
+  "ai-counsel[ml] @ git+https://github.com/stoopkidddd/ai-counsel@v0.1.0",
+  "ai-counsel"
+]
+```
+
+Notes:
+- The deliberation participant CLIs you reference (`claude`, `codex`, `droid`, `gemini`) still need to be installed locally — see [Prerequisites](#prerequisites).
+- Logs and the decision-graph DB are written to `~/.local/share/ai-counsel/` (override via `$AI_COUNSEL_DATA_HOME` or `$XDG_DATA_HOME`).
+
 ## 🎬 See It In Action
 
 **Cloud Models Debate** (Claude Sonnet, GPT-5.1 Codex, Gemini):

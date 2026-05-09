@@ -9,6 +9,8 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
+from models.paths import data_dir
+
 
 class CLIAdapterConfig(BaseModel):
     """Configuration for CLI-based adapter."""
@@ -395,36 +397,22 @@ class DecisionGraphConfig(BaseModel):
     @field_validator("db_path")
     @classmethod
     def resolve_db_path(cls, v: str) -> str:
-        """
-        Resolve db_path to absolute path relative to project root.
+        """Resolve db_path to an absolute filesystem path.
 
-        This validator ensures that relative database paths are always resolved
-        relative to the project root directory (where config.yaml is located),
-        not the current working directory. This prevents breakage when running
-        the server from different directories.
-
-        Processing steps:
-        1. Resolve ${ENV_VAR} environment variable references
-        2. Convert relative paths to absolute paths relative to project root
-        3. Keep absolute paths unchanged
-        4. Return normalized absolute path as string
+        Order:
+          1. Expand ``${ENV_VAR}`` references.
+          2. Expand ``~`` home references.
+          3. Absolute paths are kept as-is.
+          4. Relative paths resolve against the user data directory
+             (``$AI_COUNSEL_DATA_HOME`` / ``$XDG_DATA_HOME/ai-counsel`` /
+             ``~/.local/share/ai-counsel``).
 
         Examples:
-            "decision_graph.db" → "/path/to/project/decision_graph.db"
-            "/tmp/foo.db" → "/tmp/foo.db" (unchanged)
+            "decision_graph.db" → "~/.local/share/ai-counsel/decision_graph.db"
+            "/tmp/foo.db" → "/tmp/foo.db"
+            "~/dbs/graph.db" → "/Users/me/dbs/graph.db"
             "${DATA_DIR}/graph.db" → "/var/data/graph.db" (if DATA_DIR=/var/data)
-            "../shared/graph.db" → "/path/to/shared/graph.db"
-
-        Args:
-            v: Database path from configuration (may contain env vars)
-
-        Returns:
-            Absolute path as string
-
-        Raises:
-            ValueError: If environment variable is referenced but not set
         """
-        # Step 1: Resolve environment variables using ${VAR_NAME} pattern
         pattern = r"\$\{([^}]+)\}"
 
         def replacer(match):
@@ -438,18 +426,9 @@ class DecisionGraphConfig(BaseModel):
             return value
 
         resolved = re.sub(pattern, replacer, v)
-
-        # Step 2: Convert to Path object
-        path = Path(resolved)
-
-        # Step 3: If relative, make it relative to project root
+        path = Path(resolved).expanduser()
         if not path.is_absolute():
-            # This file is at: project_root/models/config.py
-            # Project root is two levels up from this file
-            project_root = Path(__file__).parent.parent
-            path = (project_root / path).resolve()
-
-        # Step 4: Return as string (normalized, absolute)
+            path = (data_dir() / path).resolve()
         return str(path)
 
 

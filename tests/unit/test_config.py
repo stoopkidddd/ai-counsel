@@ -520,22 +520,21 @@ class TestDecisionGraphConfig:
     """Tests for DecisionGraphConfig path resolution."""
 
     @pytest.fixture
-    def project_root(self):
-        """
-        Get the actual project root directory.
+    def data_root(self, tmp_path, monkeypatch):
+        """Hermetic user data directory for db_path resolution tests.
 
-        The project root is where config.yaml is located, which is two levels
-        up from models/config.py where DecisionGraphConfig is defined.
+        Sets ``AI_COUNSEL_DATA_HOME`` so the validator resolves relative
+        paths against ``tmp_path`` instead of polluting the developer's
+        real ``~/.local/share/ai-counsel`` directory.
         """
-        # This mirrors the logic in DecisionGraphConfig.resolve_db_path
-        config_module_path = Path(__file__).parent.parent.parent / "models" / "config.py"
-        return config_module_path.parent.parent
+        monkeypatch.setenv("AI_COUNSEL_DATA_HOME", str(tmp_path))
+        return tmp_path
 
-    def test_db_path_relative_to_project_root(self, project_root):
+    def test_db_path_relative_to_data_root(self, data_root):
         """
         Test that relative path is resolved relative to project root.
 
-        Verifies that "decision_graph.db" resolves to project_root/decision_graph.db,
+        Verifies that "decision_graph.db" resolves to data_root/decision_graph.db,
         not the current working directory. This prevents breakage when running
         the server from different directories.
         """
@@ -548,7 +547,7 @@ class TestDecisionGraphConfig:
         assert resolved_path.is_absolute(), "Resolved path should be absolute"
 
         # Path should be at project root
-        expected_path = (project_root / "decision_graph.db").resolve()
+        expected_path = (data_root / "decision_graph.db").resolve()
         assert config.db_path == str(expected_path), (
             f"Expected {expected_path}, got {config.db_path}"
         )
@@ -556,7 +555,7 @@ class TestDecisionGraphConfig:
         # Verify it's a string, not a Path object
         assert isinstance(config.db_path, str), "db_path should be returned as string"
 
-    def test_db_path_absolute_unchanged(self, project_root):
+    def test_db_path_absolute_unchanged(self, data_root):
         """
         Test that absolute paths are kept unchanged.
 
@@ -578,7 +577,7 @@ class TestDecisionGraphConfig:
             f"Absolute path should be preserved unchanged"
         )
 
-    def test_db_path_with_env_var(self, project_root, monkeypatch):
+    def test_db_path_with_env_var(self, data_root, monkeypatch):
         """
         Test that environment variables are resolved before path resolution.
 
@@ -608,12 +607,12 @@ class TestDecisionGraphConfig:
             "Path with resolved env var should be absolute"
         )
 
-    def test_db_path_with_relative_env_var(self, project_root, monkeypatch):
+    def test_db_path_with_relative_env_var(self, data_root, monkeypatch):
         """
         Test that relative paths in env vars are resolved relative to project root.
 
         Verifies that if DATA_DIR="data" (relative), then "${DATA_DIR}/graph.db"
-        resolves to project_root/data/graph.db.
+        resolves to data_root/data/graph.db.
         """
         from models.config import DecisionGraphConfig
 
@@ -626,12 +625,12 @@ class TestDecisionGraphConfig:
         )
 
         # Should resolve env var, then make absolute relative to project root
-        expected_path = (project_root / "data" / "graph.db").resolve()
+        expected_path = (data_root / "data" / "graph.db").resolve()
         assert config.db_path == str(expected_path), (
             f"Expected {expected_path}, got {config.db_path}"
         )
 
-    def test_db_path_parent_directory(self, project_root):
+    def test_db_path_parent_directory(self, data_root):
         """
         Test that parent directory references are resolved correctly.
 
@@ -643,7 +642,7 @@ class TestDecisionGraphConfig:
         config = DecisionGraphConfig(enabled=True, db_path="../shared/graph.db")
 
         # Should resolve .. relative to project root
-        expected_path = (project_root / ".." / "shared" / "graph.db").resolve()
+        expected_path = (data_root / ".." / "shared" / "graph.db").resolve()
         assert config.db_path == str(expected_path), (
             f"Expected {expected_path}, got {config.db_path}"
         )
@@ -653,12 +652,12 @@ class TestDecisionGraphConfig:
             "Path with parent directory should be absolute"
         )
 
-    def test_db_path_subdirectory(self, project_root):
+    def test_db_path_subdirectory(self, data_root):
         """
         Test that subdirectory paths preserve structure under project root.
 
         Verifies that "data/graphs/db.db" resolves to
-        project_root/data/graphs/db.db with directory structure preserved.
+        data_root/data/graphs/db.db with directory structure preserved.
         """
         from models.config import DecisionGraphConfig
 
@@ -668,7 +667,7 @@ class TestDecisionGraphConfig:
         )
 
         # Should preserve subdirectory structure under project root
-        expected_path = (project_root / "data" / "graphs" / "decision_graph.db").resolve()
+        expected_path = (data_root / "data" / "graphs" / "decision_graph.db").resolve()
         assert config.db_path == str(expected_path), (
             f"Expected {expected_path}, got {config.db_path}"
         )
@@ -729,7 +728,7 @@ class TestDecisionGraphConfig:
             f"Expected {expected_path}, got {config.db_path}"
         )
 
-    def test_db_path_default_value(self, project_root):
+    def test_db_path_default_value(self, data_root):
         """
         Test that default db_path value is set correctly.
 
@@ -748,60 +747,43 @@ class TestDecisionGraphConfig:
             f"Expected default 'decision_graph.db', got {config.db_path}"
         )
 
-    def test_db_path_cwd_independence(self, project_root, tmp_path, monkeypatch):
+    def test_db_path_cwd_independence(self, data_root, monkeypatch):
         """
         Test that db_path resolution is independent of current working directory.
 
-        Verifies that relative paths are always resolved relative to project root,
-        not the current working directory. This is critical for reliability when
-        running the server from different directories.
+        Verifies that relative paths resolve against the user data directory,
+        not the current working directory. Critical for reliability when running
+        the server from arbitrary client cwd.
         """
         from models.config import DecisionGraphConfig
 
-        # Change to a temporary directory
-        monkeypatch.chdir(tmp_path)
+        # Change to a directory that is not the data_root
+        cwd_dir = data_root / "elsewhere"
+        cwd_dir.mkdir()
+        monkeypatch.chdir(cwd_dir)
+        assert Path.cwd() != data_root, "Should be in different directory"
 
-        # Verify we're in a different directory
-        assert Path.cwd() != project_root, "Should be in different directory"
-
-        # Create config with relative path
         config = DecisionGraphConfig(enabled=True, db_path="decision_graph.db")
 
-        # Path should still resolve relative to project root, not cwd
-        expected_path = (project_root / "decision_graph.db").resolve()
+        expected_path = (data_root / "decision_graph.db").resolve()
         assert config.db_path == str(expected_path), (
-            f"Path should be relative to project root, not cwd"
+            "Path should resolve against data_root, not cwd"
         )
-
-        # Should NOT be in tmp_path
-        assert not config.db_path.startswith(str(tmp_path)), (
+        assert not config.db_path.startswith(str(cwd_dir)), (
             "Path should not be relative to current working directory"
         )
 
-    def test_db_path_home_directory_expansion(self, project_root):
-        """
-        Test that home directory (~) references are treated as relative paths.
-
-        Note: The current implementation treats "~/data/graph.db" as a relative
-        path (since Path("~/data/graph.db").is_absolute() returns False), so it
-        gets resolved relative to project root. This is a known limitation.
-        If you need home directory expansion, use an absolute path or env var.
-        """
+    def test_db_path_home_directory_expansion(self, data_root):
+        """``~`` in db_path is expanded to the user's home directory."""
         from models.config import DecisionGraphConfig
 
         config = DecisionGraphConfig(enabled=True, db_path="~/data/graph.db")
 
-        # Current behavior: ~ is treated as relative path, resolved from project root
-        # This is because Path("~/data").is_absolute() returns False
-        expected_path = (project_root / "~" / "data" / "graph.db").resolve()
+        expected_path = (Path.home() / "data" / "graph.db").resolve()
         assert config.db_path == str(expected_path), (
             f"Expected {expected_path}, got {config.db_path}"
         )
-
-        # Should be absolute (resolved from project root)
-        assert Path(config.db_path).is_absolute(), (
-            "Path should be absolute after resolution"
-        )
+        assert Path(config.db_path).is_absolute()
 
     def test_db_path_validation_fields(self):
         """
@@ -827,7 +809,7 @@ class TestDecisionGraphConfig:
         assert config.max_context_decisions == 5
         assert config.compute_similarities is False
 
-    def test_db_path_invalid_similarity_threshold_still_validates_path(self, project_root):
+    def test_db_path_invalid_similarity_threshold_still_validates_path(self, data_root):
         """
         Test that db_path is validated even if other field validation fails.
 
