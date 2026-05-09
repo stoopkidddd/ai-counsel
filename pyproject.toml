@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-counsel"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for true deliberative consensus between AI models"
 readme = "README.md"
 license = { file = "LICENSE" }
