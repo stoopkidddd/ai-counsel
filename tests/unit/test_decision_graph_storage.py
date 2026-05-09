@@ -936,6 +936,17 @@ class TestThreadingMigration:
         cols2 = {row[1] for row in s2.conn.execute("PRAGMA table_info(decision_nodes)").fetchall()}
         assert cols == cols2
 
+    def test_re_init_does_not_duplicate_schema_version_rows(self, tmp_path):
+        """Opening a fully-migrated DB twice doesn't insert duplicate version rows."""
+        db_path = str(tmp_path / "graph.db")
+        s1 = DecisionGraphStorage(db_path)
+        rows1 = s1.conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
+        s1.close()
+
+        s2 = DecisionGraphStorage(db_path)
+        rows2 = s2.conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
+        assert rows1 == rows2
+
     def test_migration_upgrades_legacy_db(self, tmp_path):
         """A pre-existing DB without threading columns gets ALTER TABLE'd in place."""
         db_path = str(tmp_path / "legacy.db")
@@ -1033,3 +1044,137 @@ class TestThreadingMigration:
         chain = storage.get_decisions_by_thread("thr-A")
         # Sorted ascending by timestamp: ts=0 (d1), ts=1 (d2), ts=2 (d0)
         assert [d.id for d in chain] == ["d1", "d2", "d0"]
+
+
+class TestSchemaVersioning:
+    """Tests for the versioned migration framework (schema_version table)."""
+
+    def test_fresh_db_records_all_migration_versions(self, storage):
+        """A new in-memory DB lands at CURRENT_SCHEMA_VERSION with all steps recorded."""
+        from decision_graph.storage import CURRENT_SCHEMA_VERSION
+
+        rows = storage.conn.execute(
+            "SELECT version FROM schema_version ORDER BY version"
+        ).fetchall()
+        applied = [r[0] for r in rows]
+        assert applied == list(range(1, CURRENT_SCHEMA_VERSION + 1))
+
+    def test_schema_version_table_has_applied_at_timestamps(self, storage):
+        """Each recorded version has a non-null ISO timestamp."""
+        from datetime import datetime as dt
+
+        rows = storage.conn.execute(
+            "SELECT version, applied_at FROM schema_version"
+        ).fetchall()
+        assert rows
+        for version, applied_at in rows:
+            assert applied_at is not None
+            # Must round-trip through fromisoformat
+            dt.fromisoformat(applied_at)
+
+    def test_legacy_v01_db_migrates_through_all_versions(self, tmp_path):
+        """A pre-versioning DB (no schema_version, no threading) catches up cleanly."""
+        from decision_graph.storage import CURRENT_SCHEMA_VERSION
+
+        db_path = str(tmp_path / "legacy_v01.db")
+        legacy = sqlite3.connect(db_path)
+        legacy.execute(
+            """
+            CREATE TABLE decision_nodes (
+                id TEXT PRIMARY KEY, question TEXT NOT NULL, timestamp TEXT NOT NULL,
+                consensus TEXT NOT NULL, winning_option TEXT, convergence_status TEXT NOT NULL,
+                participants TEXT NOT NULL, transcript_path TEXT NOT NULL, metadata TEXT
+            )
+            """
+        )
+        legacy.commit()
+        legacy.close()
+
+        storage = DecisionGraphStorage(db_path)
+
+        applied = [
+            r[0] for r in storage.conn.execute(
+                "SELECT version FROM schema_version ORDER BY version"
+            ).fetchall()
+        ]
+        assert applied == list(range(1, CURRENT_SCHEMA_VERSION + 1))
+
+        cols = {row[1] for row in storage.conn.execute("PRAGMA table_info(decision_nodes)").fetchall()}
+        assert "thread_id" in cols
+        assert "parent_decision_id" in cols
+
+    def test_handrolled_v02_db_reconciles_to_current_version(self, tmp_path):
+        """A DB with threading columns but no schema_version (upgraded by the
+        original hand-rolled migration) is reconciled, not re-migrated."""
+        db_path = str(tmp_path / "handrolled.db")
+        legacy = sqlite3.connect(db_path)
+        legacy.execute(
+            """
+            CREATE TABLE decision_nodes (
+                id TEXT PRIMARY KEY, question TEXT NOT NULL, timestamp TEXT NOT NULL,
+                consensus TEXT NOT NULL, winning_option TEXT, convergence_status TEXT NOT NULL,
+                participants TEXT NOT NULL, transcript_path TEXT NOT NULL, metadata TEXT,
+                thread_id TEXT, parent_decision_id TEXT
+            )
+            """
+        )
+        legacy.commit()
+        legacy.close()
+
+        storage = DecisionGraphStorage(db_path)
+        applied = [
+            r[0] for r in storage.conn.execute(
+                "SELECT version FROM schema_version ORDER BY version"
+            ).fetchall()
+        ]
+        # Must include both versions, not error on duplicate ALTER TABLE
+        assert applied == [1, 2]
+
+    def test_db_newer_than_code_logs_warning_and_proceeds(self, tmp_path, caplog):
+        """If schema_version exceeds code's CURRENT_SCHEMA_VERSION (downgrade
+        scenario), the storage logs a warning and continues without erroring."""
+        import logging
+
+        from decision_graph.storage import CURRENT_SCHEMA_VERSION
+
+        db_path = str(tmp_path / "future.db")
+        # Build a DB that's "from the future" — schema_version says v3, but
+        # code only knows up to CURRENT_SCHEMA_VERSION (today: 2).
+        future = sqlite3.connect(db_path)
+        future.execute(
+            """
+            CREATE TABLE decision_nodes (
+                id TEXT PRIMARY KEY, question TEXT NOT NULL, timestamp TEXT NOT NULL,
+                consensus TEXT NOT NULL, winning_option TEXT, convergence_status TEXT NOT NULL,
+                participants TEXT NOT NULL, transcript_path TEXT NOT NULL, metadata TEXT,
+                thread_id TEXT, parent_decision_id TEXT
+            )
+            """
+        )
+        future.execute(
+            """
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL
+            )
+            """
+        )
+        future_v = CURRENT_SCHEMA_VERSION + 1
+        future.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, '2099-01-01')",
+            (future_v,),
+        )
+        future.commit()
+        future.close()
+
+        with caplog.at_level(logging.WARNING):
+            storage = DecisionGraphStorage(db_path)
+
+        assert any(
+            "newer than this code supports" in record.message
+            for record in caplog.records
+        )
+        # Existing version row preserved; nothing forcibly added
+        rows = storage.conn.execute(
+            "SELECT version FROM schema_version ORDER BY version"
+        ).fetchall()
+        assert future_v in {r[0] for r in rows}

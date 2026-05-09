@@ -18,6 +18,16 @@ from decision_graph.schema import (DecisionNode, DecisionSimilarity,
 
 logger = logging.getLogger(__name__)
 
+# Schema versioning. Bump this when adding a new migration step in
+# _apply_migration(). Each version corresponds to a single migration that
+# brings the DB from version N-1 to version N.
+#
+#   v1 — baseline schema (decision_nodes / participant_stances /
+#        decision_similarities tables created by _initialize_db).
+#   v2 — conversation threading: decision_nodes.thread_id +
+#        parent_decision_id columns, idx_decision_thread + idx_decision_parent.
+CURRENT_SCHEMA_VERSION = 2
+
 
 class DecisionGraphStorage:
     """SQLite storage layer for decision graph memory.
@@ -218,32 +228,110 @@ class DecisionGraphStorage:
             logger.debug("Database schema and indexes initialized successfully")
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
-        """Apply additive schema migrations on top of the base schema.
+        """Apply pending schema migrations using a versioned framework.
 
-        Idempotent: every step checks current state via PRAGMA table_info or
-        sqlite_master before issuing DDL. Safe to run on every startup.
+        A ``schema_version`` table records which migrations have been applied.
+        On startup we read the current version and apply any pending steps
+        sequentially up to ``CURRENT_SCHEMA_VERSION``.
+
+        Each migration body remains idempotent (PRAGMA-checked DDL,
+        ``CREATE INDEX IF NOT EXISTS``, etc.) so reconciling a partially-
+        migrated database is always safe.
         """
-        cursor = conn.execute("PRAGMA table_info(decision_nodes)")
-        existing_columns = {row[1] for row in cursor.fetchall()}
-
-        if "thread_id" not in existing_columns:
-            conn.execute("ALTER TABLE decision_nodes ADD COLUMN thread_id TEXT")
-            logger.info("Migration: added decision_nodes.thread_id column")
-        if "parent_decision_id" not in existing_columns:
-            conn.execute(
-                "ALTER TABLE decision_nodes ADD COLUMN parent_decision_id TEXT"
+        # Bootstrap: the version table itself.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
             )
-            logger.info("Migration: added decision_nodes.parent_decision_id column")
+            """
+        )
 
-        # Indexes for thread-based queries (continuation lookup + parent traversal)
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_decision_thread "
-            "ON decision_nodes(thread_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_decision_parent "
-            "ON decision_nodes(parent_decision_id)"
-        )
+        current = self._get_current_schema_version(conn)
+
+        # Reconcile users who upgraded via the original hand-rolled migration
+        # (they have the v2 threading columns but no schema_version rows).
+        if current == 0:
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(decision_nodes)").fetchall()
+            }
+            if "thread_id" in cols and "parent_decision_id" in cols:
+                now = datetime.now().isoformat()
+                for v in (1, 2):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                        (v, now),
+                    )
+                current = 2
+                logger.info(
+                    "Reconciled schema_version to 2 (threading columns already present "
+                    "from a prior hand-rolled migration)"
+                )
+
+        if current > CURRENT_SCHEMA_VERSION:
+            logger.warning(
+                f"Database schema_version ({current}) is newer than this code "
+                f"supports ({CURRENT_SCHEMA_VERSION}). Possible downgrade — "
+                "proceeding without migration."
+            )
+            return
+
+        for target in range(current + 1, CURRENT_SCHEMA_VERSION + 1):
+            self._apply_migration(conn, target)
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (target, datetime.now().isoformat()),
+            )
+            logger.info(f"Applied schema migration v{target}")
+
+    @staticmethod
+    def _get_current_schema_version(conn: sqlite3.Connection) -> int:
+        """Return the highest applied schema version, or 0 if none recorded."""
+        row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        return row[0] or 0
+
+    @staticmethod
+    def _apply_migration(conn: sqlite3.Connection, target: int) -> None:
+        """Apply a single migration step. Idempotent for safety.
+
+        Migration bodies are kept idempotent (PRAGMA-checked ALTER TABLE,
+        CREATE INDEX IF NOT EXISTS) so a partially-applied or interrupted
+        migration can be safely re-run.
+        """
+        if target == 1:
+            # v1 baseline: tables created by _initialize_db's CREATE TABLE
+            # IF NOT EXISTS statements. Nothing additional to do here; this
+            # step exists so the schema_version row is recorded.
+            return
+
+        if target == 2:
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(decision_nodes)").fetchall()
+            }
+            if "thread_id" not in cols:
+                conn.execute("ALTER TABLE decision_nodes ADD COLUMN thread_id TEXT")
+                logger.info("Migration v2: added decision_nodes.thread_id column")
+            if "parent_decision_id" not in cols:
+                conn.execute(
+                    "ALTER TABLE decision_nodes ADD COLUMN parent_decision_id TEXT"
+                )
+                logger.info(
+                    "Migration v2: added decision_nodes.parent_decision_id column"
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_thread "
+                "ON decision_nodes(thread_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_parent "
+                "ON decision_nodes(parent_decision_id)"
+            )
+            return
+
+        raise ValueError(f"No migration registered for schema version {target}")
 
     def _verify_schema(self) -> bool:
         """Verify that the database schema was properly created.
