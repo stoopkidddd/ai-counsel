@@ -91,16 +91,19 @@ cli_tools:
     command: "gemini"
     args:
       [
+        "--skip-trust",
         "-m",
         "{model}",
         "-p",
         "{prompt}",
       ]
     timeout: 300
-    # Valid models: "gemini-2.5-pro" (default) or other Gemini identifiers
+    # Valid models: "gemini-3-pro-preview" (default), "gemini-2.5-pro", or other Gemini identifiers
     #
     # Working Directory Configuration:
     # - Subprocess runs from {working_directory} (set via cwd)
+    # - --skip-trust: auto-trust the workspace for this non-interactive session,
+    #   bypassing the "Do you trust this folder?" prompt that otherwise aborts headless runs.
     # - Gemini CLI removed --include-directories flag in recent update
     # Note: If file access issues occur, check Gemini's workspace settings
 
@@ -272,10 +275,14 @@ model_registry:
       tier: "open-source"
       enabled: true
   gemini:
+    - id: "gemini-3-pro-preview"
+      label: "Gemini 3 Pro Preview"
+      tier: "general"
+      default: true
+      enabled: true
     - id: "gemini-2.5-pro"
       label: "Gemini 2.5 Pro"
       tier: "general"
-      default: true
       enabled: true
   openrouter:
     - id: "anthropic/claude-sonnet-4"
